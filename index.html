@@ -83,36 +83,62 @@ const needPDF=()=>lib('pdf',()=>load('https://cdn.jsdelivr.net/npm/jspdf@2.5.1/d
 function go(n){['s0','s1','s2'].forEach((id,i)=>$('#'+id).hidden=i!==n);document.querySelectorAll('.st').forEach((e,i)=>{e.classList.toggle('on',i<=n);e.classList.toggle('cur',i===n)})}
 $('#theme').onclick=()=>{const d=document.documentElement,sys=matchMedia('(prefers-color-scheme:dark)').matches,cur=d.dataset.theme||(sys?'dark':'light'),nx=cur==='dark'?'light':'dark';d.dataset.theme=nx;$('#theme').textContent=nx==='dark'?'Light mode':'Dark mode'};
 
-async function toCanvas(file){const im=new Image();im.src=URL.createObjectURL(file);await im.decode();const k=Math.min(1,2200/Math.max(im.naturalWidth,im.naturalHeight)),c=document.createElement('canvas');c.width=im.naturalWidth*k|0;c.height=im.naturalHeight*k|0;c.getContext('2d').drawImage(im,0,0,c.width,c.height);return c}
+async function toCanvas(file){const im=new Image();im.src=URL.createObjectURL(file);await im.decode();const k=Math.min(1,4000/Math.max(im.naturalWidth,im.naturalHeight)),c=document.createElement('canvas');c.width=im.naturalWidth*k|0;c.height=im.naturalHeight*k|0;c.getContext('2d').drawImage(im,0,0,c.width,c.height);return c}
 
-// Edge and corner detection, perspective flattening, shadow removal
-function flatten(src,full){
-  const m=cv.imread(src),g=new cv.Mat(),e=new cv.Mat(),h=new cv.Mat(),cs=new cv.MatVector();let best=null;
-  if(!full){
-    cv.cvtColor(m,g,cv.COLOR_RGBA2GRAY);cv.GaussianBlur(g,g,new cv.Size(5,5),0);
-    cv.Canny(g,e,50,150);cv.dilate(e,e,cv.Mat.ones(5,5,cv.CV_8U));
-    cv.findContours(e,cs,h,cv.RETR_LIST,cv.CHAIN_APPROX_SIMPLE);
-    let area=src.width*src.height*0.2;
-    for(let i=0;i<cs.size();i++){const c=cs.get(i),a=cv.contourArea(c);
-      if(a>area){const ap=new cv.Mat();cv.approxPolyDP(c,ap,0.02*cv.arcLength(c,true),true);
-        if(ap.rows===4&&cv.isContourConvex(ap)){best=Array.from(ap.data32S);area=a}ap.delete()}c.delete()}
-  }
-  let out;
-  if(best){
-    const P=[[best[0],best[1]],[best[2],best[3]],[best[4],best[5]],[best[6],best[7]]],pick=(f)=>P.reduce((a,b)=>f(a)<f(b)?a:b);
-    const tl=pick(p=>p[0]+p[1]),br=pick(p=>-(p[0]+p[1])),tr=pick(p=>-(p[0]-p[1])),bl=pick(p=>p[0]-p[1]),d=(p,q)=>Math.hypot(p[0]-q[0],p[1]-q[1]);
-    const w=Math.round(Math.max(d(tl,tr),d(bl,br))),hh=Math.round(Math.max(d(tl,bl),d(tr,br)));
+// Page detection (brightness first, edges as backup), full-resolution flattening, shadow removal, text leveling
+function quadOf(mask,minA,maxA){
+  const cs=new cv.MatVector(),h=new cv.Mat();cv.findContours(mask,cs,h,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
+  let best=null,ba=minA;
+  for(let i=0;i<cs.size();i++){const c=cs.get(i),a=cv.contourArea(c);if(a>ba&&a<maxA){ba=a;if(best)best.delete();best=c}else c.delete()}
+  let q=null;
+  if(best){const hull=new cv.Mat();cv.convexHull(best,hull);const per=cv.arcLength(hull,true);
+    for(const e of [0.02,0.03,0.05,0.08]){const ap=new cv.Mat();cv.approxPolyDP(hull,ap,e*per,true);if(ap.rows===4){q=Array.from(ap.data32S);ap.delete();break}ap.delete()}
+    if(!q){const pts=cv.RotatedRect.points(cv.minAreaRect(hull));q=pts.flatMap(p=>[Math.round(p.x),Math.round(p.y)])}
+    hull.delete();best.delete()}
+  cs.delete();h.delete();return q;
+}
+function findQuad(small){
+  const A=small.cols*small.rows,g=new cv.Mat(),m=new cv.Mat();
+  cv.cvtColor(small,g,cv.COLOR_RGBA2GRAY);cv.GaussianBlur(g,g,new cv.Size(7,7),0);
+  cv.threshold(g,m,0,255,cv.THRESH_BINARY+cv.THRESH_OTSU);
+  let q=quadOf(m,A*0.15,A*0.97);
+  if(!q){cv.Canny(g,m,50,150);cv.dilate(m,m,cv.Mat.ones(5,5,cv.CV_8U));q=quadOf(m,A*0.2,A*0.97)}
+  g.delete();m.delete();return q;
+}
+function skewAngle(bw){ // tilt in degrees that makes the text rows crispest
+  let best=0,bs=-1;
+  for(let a=-4;a<=4;a+=0.25){
+    const M=cv.getRotationMatrix2D(new cv.Point(bw.cols/2,bw.rows/2),a,1),r=new cv.Mat(),p=new cv.Mat();
+    cv.warpAffine(bw,r,M,new cv.Size(bw.cols,bw.rows));cv.reduce(r,p,1,cv.REDUCE_SUM,cv.CV_32F);
+    let s=0;const d=p.data32F;for(let i=1;i<d.length;i++)s+=(d[i]-d[i-1])**2;
+    if(s>bs){bs=s;best=a}M.delete();r.delete();p.delete()}
+  return best;
+}
+function flatten(photo,full){
+  const sc=Math.min(1,1000/Math.max(photo.width,photo.height)),m=cv.imread(photo);let q=null,out=new cv.Mat();
+  if(!full){const sm=new cv.Mat();cv.resize(m,sm,new cv.Size(Math.round(m.cols*sc),Math.round(m.rows*sc)),0,0,cv.INTER_AREA);q=findQuad(sm);sm.delete()}
+  if(q){ // warp from the FULL-resolution photo using corners found on a small copy
+    const P=[0,2,4,6].map(i=>[q[i]/sc,q[i+1]/sc]),pick=f=>P.reduce((a,b)=>f(a)<f(b)?a:b);
+    const tl=pick(p=>p[0]+p[1]),br=pick(p=>-(p[0]+p[1])),tr=pick(p=>-(p[0]-p[1])),bl=pick(p=>p[0]-p[1]),d=(p,r)=>Math.hypot(p[0]-r[0],p[1]-r[1]);
+    let w=Math.max(d(tl,tr),d(bl,br)),hh=Math.max(d(tl,bl),d(tr,br));const k=Math.min(1,2600/Math.max(w,hh));w=Math.round(w*k);hh=Math.round(hh*k);
     const a=cv.matFromArray(4,1,cv.CV_32FC2,[...tl,...tr,...br,...bl]),b=cv.matFromArray(4,1,cv.CV_32FC2,[0,0,w,0,w,hh,0,hh]),M=cv.getPerspectiveTransform(a,b);
-    out=new cv.Mat();cv.warpPerspective(m,out,M,new cv.Size(w,hh));a.delete();b.delete();M.delete();
-  }else out=m.clone();
-  const og=new cv.Mat(),bg=new cv.Mat(),cl=new cv.Mat();
+    cv.warpPerspective(m,out,M,new cv.Size(w,hh),cv.INTER_CUBIC);a.delete();b.delete();M.delete();
+  }else{const k=Math.min(1,2600/Math.max(m.cols,m.rows));if(k<1)cv.resize(m,out,new cv.Size(Math.round(m.cols*k),Math.round(m.rows*k)),0,0,cv.INTER_AREA);else m.copyTo(out)}
+  const og=new cv.Mat(),sm=new cv.Mat(),bg=new cv.Mat(),cl=new cv.Mat(),bu=new cv.Mat();
   cv.cvtColor(out,og,cv.COLOR_RGBA2GRAY);
-  cv.dilate(og,bg,cv.Mat.ones(7,7,cv.CV_8U));cv.medianBlur(bg,bg,31);
-  cv.divide(og,bg,cl,255);cl.convertTo(cl,-1,1.6,-100);
+  // paper-brightness map on a quarter-size copy, then divide it out (removes shadows)
+  cv.resize(og,sm,new cv.Size(og.cols>>2,og.rows>>2),0,0,cv.INTER_AREA);cv.dilate(sm,sm,cv.Mat.ones(3,3,cv.CV_8U));cv.medianBlur(sm,sm,15);
+  cv.resize(sm,bg,new cv.Size(og.cols,og.rows),0,0,cv.INTER_LINEAR);
+  cv.divide(og,bg,cl,255);cv.GaussianBlur(cl,bu,new cv.Size(0,0),1.5);cv.addWeighted(cl,1.5,bu,-0.5,0,cl);cl.convertTo(cl,-1,1.6,-100);
+  // level the text lines
+  const t=new cv.Mat();cv.resize(cl,t,new cv.Size(700,Math.round(cl.rows*700/cl.cols)),0,0,cv.INTER_AREA);cv.threshold(t,t,140,255,cv.THRESH_BINARY_INV);
+  const ang=skewAngle(t);t.delete();
+  if(Math.abs(ang)>=0.2){const M=cv.getRotationMatrix2D(new cv.Point(cl.cols/2,cl.rows/2),ang,1),r=new cv.Mat();
+    cv.warpAffine(cl,r,M,new cv.Size(cl.cols,cl.rows),cv.INTER_CUBIC,cv.BORDER_CONSTANT,new cv.Scalar(255));r.copyTo(cl);r.delete();M.delete()}
   const mx=Math.round(cl.cols*0.012),my=Math.round(cl.rows*0.012),roi=cl.roi(new cv.Rect(mx,my,cl.cols-2*mx,cl.rows-2*my));
   const res=document.createElement('canvas');cv.imshow(res,roi);roi.delete();
-  [m,g,e,h,cs,out,og,bg,cl].forEach(x=>x.delete());
-  return{canvas:res,found:!!best};
+  [m,out,og,sm,bg,cl,bu].forEach(x=>x.delete());
+  return{canvas:res,found:!!q};
 }
 
 // Layout: group OCR lines into blocks; detect headings, alignment and size
@@ -175,7 +201,7 @@ async function save(blob,name){const f=new File([blob],name,{type:blob.type});
   if(navigator.canShare?.({files:[f]})){try{await navigator.share({files:[f]});return}catch(e){if(e.name==='AbortError')return}}
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click()}
 $('#pdf').onclick=async()=>{await needPDF();const{jsPDF}=window.jspdf,[w,h]=S.dim,pw=595.28,ph=pw*h/w,k=pw/w,d=new jsPDF({unit:'pt',format:[pw,ph],orientation:w>h?'l':'p'});
-  d.addImage(S.scan.toDataURL('image/jpeg',0.92),'JPEG',0,0,pw,ph);d.setFont('helvetica');
+  d.addImage(S.scan.toDataURL('image/jpeg',0.9),'JPEG',0,0,pw,ph);d.setFont('helvetica');
   for(const x of S.words){const hh=(x.y1-x.y0)*k;d.setFontSize(Math.max(4,hh*0.85));d.text(x.t,x.x0*k,x.y1*k-hh*0.15,{renderingMode:'invisible'})}
   save(d.output('blob'),'scan.pdf')};
 $('#pdf2').onclick=async()=>{await needPDF();const{jsPDF}=window.jspdf,d=new jsPDF({unit:'pt',format:'a4'}),W=d.internal.pageSize.getWidth(),H=d.internal.pageSize.getHeight(),M=56;let y=M;
