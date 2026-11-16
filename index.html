@@ -33,6 +33,9 @@ canvas{width:100%;border:1px solid var(--line);border-radius:4px;background:#fff
 #busy{text-align:center;padding:80px 0;color:var(--mute)}
 #printDoc{display:none}
 @media print{body>*{display:none!important}#printDoc{display:block!important;color:#000;font:11pt/1.5 Georgia,serif;padding:0}}
+.seg{display:flex;border:1px solid var(--line);border-radius:28px;overflow:hidden;margin:0 0 8px}
+.seg button{flex:1;background:none;border:0;color:var(--mute);font:inherit;padding:10px;cursor:pointer}
+.seg button.on{background:var(--acc);color:var(--on)}
 </style></head><body>
 <main>
 <header><h1>ScanEagle</h1><button class="lnk" id="theme">Dark mode</button></header>
@@ -41,6 +44,8 @@ canvas{width:100%;border:1px solid var(--line);border-radius:4px;background:#fff
 <section id="s0">
   <h2>Scan a page.<br>Get a document.</h2>
   <p class="lead">The page is found, flattened and cleaned. Then it is read and rebuilt as text you can edit, search and print.</p>
+  <div class="seg" id="modes"><button data-m="doc" class="on">Document</button><button data-m="color">Color</button><button data-m="board">Whiteboard</button></div>
+  <p class="note" id="modeNote">Black and white. Best for letters, forms, receipts, books and notebooks.</p>
   <p class="err" id="err"></p>
   <label class="btn">Take a photo<input type="file" accept="image/*" capture="environment" id="cam"></label>
   <label class="btn q">Choose a photo<input type="file" accept="image/*" id="lib"></label>
@@ -51,7 +56,7 @@ canvas{width:100%;border:1px solid var(--line);border-radius:4px;background:#fff
   <div id="res" hidden>
     <canvas id="view"></canvas>
     <p class="note" id="qc"></p>
-    <button class="lnk" id="full">The crop looks wrong. Use the full photo.</button>
+    <button class="lnk" id="full">The crop looks wrong. Use the full photo.</button> <button class="lnk" id="rot" style="margin-left:16px">Rotate 90°</button>
     <div id="blocks" style="margin-top:12px"></div>
     <button class="btn" id="next">Looks right, continue</button>
   </div>
@@ -59,8 +64,9 @@ canvas{width:100%;border:1px solid var(--line);border-radius:4px;background:#fff
 
 <section id="s2" hidden>
   <h2>Your document is ready</h2>
-  <p class="lead">The first PDF keeps the cleaned page exactly as scanned, with searchable text behind it. The rebuilt PDF is typeset from the text you edited.</p>
-  <button class="btn" id="pdf">Save as PDF, looks like the page</button>
+  <p class="lead">The vector PDF traces the ink as sharp shapes in black, so it stays crisp at any zoom. The page PDF keeps the cleaned photo, in color if you chose Color or Whiteboard. The rebuilt PDF is typeset from your edits. All three are searchable.</p>
+  <button class="btn" id="vec">Save as vector PDF</button>
+  <button class="btn q" id="pdf">Save as PDF, looks like the page</button>
   <button class="btn q" id="pdf2">Save as rebuilt document PDF</button>
   <button class="btn q" id="print">Print</button>
   <button class="btn q" id="png">Save the cleaned scan</button>
@@ -72,7 +78,7 @@ canvas{width:100%;border:1px solid var(--line);border-radius:4px;background:#fff
 
 <script>
 const $=s=>document.querySelector(s);
-const S={blocks:[],photo:null,scan:null};
+const S={blocks:[],photo:null,scan:null,mode:'doc'};
 const esc=t=>t.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const load=src=>new Promise((ok,no)=>{const s=document.createElement('script');s.src=src;s.onload=ok;s.onerror=()=>no(new Error('Could not load '+src));document.head.append(s)});
 const memo={};const lib=(k,f)=>memo[k]??=f();
@@ -124,20 +130,34 @@ function flatten(photo,full){
     const a=cv.matFromArray(4,1,cv.CV_32FC2,[...tl,...tr,...br,...bl]),b=cv.matFromArray(4,1,cv.CV_32FC2,[0,0,w,0,w,hh,0,hh]),M=cv.getPerspectiveTransform(a,b);
     cv.warpPerspective(m,out,M,new cv.Size(w,hh),cv.INTER_CUBIC);a.delete();b.delete();M.delete();
   }else{const k=Math.min(1,2600/Math.max(m.cols,m.rows));if(k<1)cv.resize(m,out,new cv.Size(Math.round(m.cols*k),Math.round(m.rows*k)),0,0,cv.INTER_AREA);else m.copyTo(out)}
-  const og=new cv.Mat(),sm=new cv.Mat(),bg=new cv.Mat(),cl=new cv.Mat(),bu=new cv.Mat();
+  const mode=S.mode||'doc',og=new cv.Mat(),sm=new cv.Mat(),bg=new cv.Mat(),cl=new cv.Mat(),bu=new cv.Mat(),gy=new cv.Mat();
   cv.cvtColor(out,og,cv.COLOR_RGBA2GRAY);
-  // paper-brightness map on a quarter-size copy, then divide it out (removes shadows)
   cv.resize(og,sm,new cv.Size(og.cols>>2,og.rows>>2),0,0,cv.INTER_AREA);cv.dilate(sm,sm,cv.Mat.ones(3,3,cv.CV_8U));cv.medianBlur(sm,sm,15);
   cv.resize(sm,bg,new cv.Size(og.cols,og.rows),0,0,cv.INTER_LINEAR);
-  cv.divide(og,bg,cl,255);cv.GaussianBlur(cl,bu,new cv.Size(0,0),1.5);cv.addWeighted(cl,1.5,bu,-0.5,0,cl);cl.convertTo(cl,-1,1.6,-100);
-  // level the text lines
-  const t=new cv.Mat();cv.resize(cl,t,new cv.Size(700,Math.round(cl.rows*700/cl.cols)),0,0,cv.INTER_AREA);cv.threshold(t,t,140,255,cv.THRESH_BINARY_INV);
+  if(mode==='doc'){ // black and white: divide out the paper brightness, sharpen, whiten
+    cv.divide(og,bg,cl,255);cv.GaussianBlur(cl,bu,new cv.Size(0,0),1.5);cv.addWeighted(cl,1.5,bu,-0.5,0,cl);cl.convertTo(cl,-1,1.6,-100);
+  }else{ // color and whiteboard: remove shadows per channel and keep the ink colours
+    const rgb=new cv.Mat(),ch=new cv.MatVector(),o=new cv.MatVector(),m3=new cv.Mat();
+    cv.cvtColor(out,rgb,cv.COLOR_RGBA2RGB);cv.split(rgb,ch);
+    for(let i=0;i<3;i++){const c=ch.get(i),d=new cv.Mat();cv.divide(c,bg,d,255);o.push_back(d);c.delete();d.delete()}
+    cv.merge(o,m3);
+    if(mode==='board'){m3.convertTo(m3,-1,1.5,-110);
+      const hsv=new cv.Mat(),hc=new cv.MatVector(),ho=new cv.MatVector(),h2=new cv.Mat();
+      cv.cvtColor(m3,hsv,cv.COLOR_RGB2HSV);cv.split(hsv,hc);
+      for(let i=0;i<3;i++){const c=hc.get(i),d=new cv.Mat();if(i===1)c.convertTo(d,-1,1.5,0);else c.copyTo(d);ho.push_back(d);c.delete();d.delete()}
+      cv.merge(ho,h2);cv.cvtColor(h2,m3,cv.COLOR_HSV2RGB);[hsv,hc,ho,h2].forEach(x=>x.delete());
+    }else m3.convertTo(m3,-1,1.15,-20);
+    cv.cvtColor(m3,cl,cv.COLOR_RGB2RGBA);[rgb,ch,o,m3].forEach(x=>x.delete());
+  }
+  // level the text lines (not for whiteboards)
+  if(cl.channels()>1)cv.cvtColor(cl,gy,cv.COLOR_RGBA2GRAY);else cl.copyTo(gy);
+  const t=new cv.Mat();cv.resize(gy,t,new cv.Size(700,Math.round(gy.rows*700/gy.cols)),0,0,cv.INTER_AREA);cv.threshold(t,t,140,255,cv.THRESH_BINARY_INV);
   const ang=skewAngle(t);t.delete();
-  if(Math.abs(ang)>=0.2){const M=cv.getRotationMatrix2D(new cv.Point(cl.cols/2,cl.rows/2),ang,1),r=new cv.Mat();
-    cv.warpAffine(cl,r,M,new cv.Size(cl.cols,cl.rows),cv.INTER_CUBIC,cv.BORDER_CONSTANT,new cv.Scalar(255));r.copyTo(cl);r.delete();M.delete()}
+  if(mode!=='board'&&Math.abs(ang)>=0.2){const M=cv.getRotationMatrix2D(new cv.Point(cl.cols/2,cl.rows/2),ang,1),r=new cv.Mat();
+    cv.warpAffine(cl,r,M,new cv.Size(cl.cols,cl.rows),cv.INTER_CUBIC,cv.BORDER_CONSTANT,new cv.Scalar(255,255,255,255));r.copyTo(cl);r.delete();M.delete()}
   const mx=Math.round(cl.cols*0.012),my=Math.round(cl.rows*0.012),roi=cl.roi(new cv.Rect(mx,my,cl.cols-2*mx,cl.rows-2*my));
   const res=document.createElement('canvas');cv.imshow(res,roi);roi.delete();
-  [m,out,og,sm,bg,cl,bu].forEach(x=>x.delete());
+  [m,out,og,sm,bg,cl,bu,gy].forEach(x=>x.delete());
   return{canvas:res,found:!!q};
 }
 
@@ -171,7 +191,7 @@ async function read(canvas){
 
 function show(){
   const v=$('#view');v.width=S.scan.width;v.height=S.scan.height;v.getContext('2d').drawImage(S.scan,0,0);
-  $('#qc').textContent=`Reading confidence ${S.conf}%.`+(S.doubt.length?` Please double-check: ${S.doubt.join(', ')}.`:' No doubtful words found.')+(S.found?'':' The page edges were not found, so the full photo is used.');
+  $('#qc').textContent=!S.blocks.length?'No text was found. The vector and page PDFs still work.':`Reading confidence ${S.conf}%.`+(S.doubt.length?` Please double-check: ${S.doubt.join(', ')}.`:' No doubtful words found.')+(S.found?'':' The page edges were not found, so the full photo is used.');
   const box=$('#blocks');box.innerHTML='';
   S.blocks.forEach(b=>{const c=document.createElement('div');c.className='card'+(b.type==='heading'?' h':'');
     c.innerHTML=`<div><select><option value="paragraph">Paragraph</option><option value="heading">Heading</option></select></div><textarea rows="1"></textarea>`;
@@ -209,6 +229,55 @@ $('#pdf2').onclick=async()=>{await needPDF();const{jsPDF}=window.jspdf,d=new jsP
     d.setFont('times',hd?'bold':'normal');d.setFontSize(fs);y+=hd?fs*0.4:0;
     for(const l of d.splitTextToSize(b.text,W-2*M)){if(y>H-M){d.addPage();y=M}d.text(l,x,y,{align:b.align||'left'});y+=fs*1.4}y+=fs*0.6}
   save(d.output('blob'),'document.pdf')};
+// Vector export: trace the ink into smooth filled shapes and write the PDF by hand
+const A1=t=>t.replace(/[\u2018\u2019]/g,"'").replace(/[\u201c\u201d]/g,'"').replace(/[\u2013\u2014]/g,'-').replace(/\u2026/g,'...').replace(/[^\x20-\xff]/g,'?').replace(/[\\()]/g,'\\$&');
+const fx=n=>String(+n.toFixed(2));
+function smooth(P,X,Y){ // closed polygon -> Bezier path, sharp corners kept
+  const n=P.length,T=P.map((p,j)=>{const a=P[(j+n-1)%n],c=P[(j+1)%n],u=[p[0]-a[0],p[1]-a[1]],v=[c[0]-p[0],c[1]-p[1]],
+    dot=(u[0]*v[0]+u[1]*v[1])/((Math.hypot(...u)*Math.hypot(...v))||1);return dot>0.5?[(c[0]-a[0])/6,(c[1]-a[1])/6]:[0,0]});
+  let s=`${X(P[0][0])} ${Y(P[0][1])} m\n`;
+  for(let j=0;j<n;j++){const a=P[j],b=P[(j+1)%n],ta=T[j],tb=T[(j+1)%n];
+    s+=`${X(a[0]+ta[0])} ${Y(a[1]+ta[1])} ${X(b[0]-tb[0])} ${Y(b[1]-tb[1])} ${X(b[0])} ${Y(b[1])} c\n`}
+  return s+'h\n';
+}
+function textLayer(words,k,ph){ // invisible, searchable text
+  let s='BT 3 Tr\n';
+  for(const w of words){const hh=(w.y1-w.y0)*k,fs=Math.max(3,hh*0.85),tz=Math.min(200,Math.max(40,100*((w.x1-w.x0)*k)/(Math.max(1,w.t.length)*0.5*fs)));
+    s+=`/F1 ${fx(fs)} Tf ${fx(tz)} Tz 1 0 0 1 ${fx(w.x0*k)} ${fx(ph-w.y1*k+hh*0.18)} Tm (${A1(w.t)}) Tj\n`}
+  return s+'ET\n';
+}
+function buildPDF(pw,ph,content){
+  const o=['','<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${fx(pw)} ${fx(ph)}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>`,
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>'];
+  let out='%PDF-1.4\n';const off=[];
+  for(let i=1;i<=5;i++){off[i]=out.length;out+=`${i} 0 obj\n${o[i]}\nendobj\n`}
+  const x=out.length;
+  out+='xref\n0 6\n0000000000 65535 f \n'+off.slice(1).map(v=>String(v).padStart(10,'0')+' 00000 n \n').join('')+`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${x}\n%%EOF`;
+  const u=new Uint8Array(out.length);for(let i=0;i<out.length;i++)u[i]=out.charCodeAt(i)&255;
+  return new Blob([u],{type:'application/pdf'});
+}
+function vectorBlob(){
+  const[W,H]=S.dim,pw=595.28,k=pw/W,ph=H*k,X=x=>fx(x*k),Y=y=>fx(ph-y*k);
+  const src=cv.imread(S.scan),g=new cv.Mat(),b=new cv.Mat(),cs=new cv.MatVector(),hh=new cv.Mat();
+  cv.cvtColor(src,g,cv.COLOR_RGBA2GRAY);cv.threshold(g,b,0,255,cv.THRESH_BINARY_INV+cv.THRESH_OTSU);
+  cv.findContours(b,cs,hh,cv.RETR_LIST,cv.CHAIN_APPROX_SIMPLE);
+  let paths='';
+  for(let i=0;i<cs.size();i++){const c=cs.get(i);
+    if(cv.contourArea(c)>=3){const ap=new cv.Mat();cv.approxPolyDP(c,ap,0.8,true);const d=ap.data32S,P=[];
+      for(let j=0;j<ap.rows;j++)P.push([d[2*j]+0.5,d[2*j+1]+0.5]);
+      if(P.length>=3)paths+=smooth(P,X,Y);ap.delete()}
+    c.delete()}
+  [src,g,b,cs,hh].forEach(x=>x.delete());
+  return buildPDF(pw,ph,`q 0 g 0 G ${fx(k)} w 1 j 1 J\n${paths}B*\nQ\n${textLayer(S.words,k,ph)}`);
+}
+$('#vec').onclick=async()=>{$('#vec').textContent='Tracing the ink…';await new Promise(r=>setTimeout(r,50));
+  try{await save(vectorBlob(),'scan-vector.pdf')}catch(e){alert('Vector export failed: '+e.message)}$('#vec').textContent='Save as vector PDF'};
+const NOTES={doc:'Black and white. Best for letters, forms, receipts, books and notebooks.',color:'Keeps color. Best for cards, forms with logos and anything printed in color.',board:'Whitens the board and boosts marker colors. Text is not read from whiteboards.'};
+document.querySelectorAll('#modes button').forEach(b=>b.onclick=()=>{S.mode=b.dataset.m;document.querySelectorAll('#modes button').forEach(x=>x.classList.toggle('on',x===b));$('#modeNote').textContent=NOTES[S.mode]});
+$('#rot').onclick=async()=>{const c=S.scan,r=document.createElement('canvas');r.width=c.height;r.height=c.width;const x=r.getContext('2d');x.translate(r.width,0);x.rotate(Math.PI/2);x.drawImage(c,0,0);S.scan=r;
+  $('#busy').hidden=false;$('#res').hidden=true;$('#msg').textContent='Reading text…';
+  try{Object.assign(S,await read(r));show()}catch(e){go(0);$('#err').textContent='That failed: '+e.message}};
 $('#png').onclick=()=>S.scan.toBlob(b=>save(b,'scan.png'));
 $('#print').onclick=()=>{$('#printDoc').innerHTML=S.blocks.map(b=>{const hd=b.type==='heading',fs=Math.round(11*(b.size||1));return`<p style="text-align:${b.align||'left'};font-size:${hd?Math.max(fs,14):fs}pt;font-weight:${hd?700:400}">${esc(b.text)}</p>`}).join('');print()};
 $('#theme').textContent=matchMedia('(prefers-color-scheme:dark)').matches?'Light mode':'Dark mode';
