@@ -257,19 +257,23 @@ function buildPDF(pw,ph,content){
   const u=new Uint8Array(out.length);for(let i=0;i<out.length;i++)u[i]=out.charCodeAt(i)&255;
   return new Blob([u],{type:'application/pdf'});
 }
-function vectorBlob(){
-  const[W,H]=S.dim,pw=595.28,k=pw/W,ph=H*k,X=x=>fx(x*k),Y=y=>fx(ph-y*k);
-  const src=cv.imread(S.scan),g=new cv.Mat(),b=new cv.Mat(),cs=new cv.MatVector(),hh=new cv.Mat();
-  cv.cvtColor(src,g,cv.COLOR_RGBA2GRAY);cv.threshold(g,b,0,255,cv.THRESH_BINARY_INV+cv.THRESH_OTSU);
-  cv.findContours(b,cs,hh,cv.RETR_LIST,cv.CHAIN_APPROX_SIMPLE);
+function vectorBlob(){ // trace from an upscaled copy so thin strokes, dots and curves survive
+  const[W,H]=S.dim,pw=595.28,k=pw/W,ph=H*k,X=x=>fx(x*k),Y=y=>fx(ph-y*k),s=Math.max(1,Math.min(3,Math.sqrt(14e6/(W*H))));
+  const src=cv.imread(S.scan),g=new cv.Mat(),big=new cv.Mat(),b1=new cv.Mat(),b2=new cv.Mat(),cs=new cv.MatVector(),hh=new cv.Mat();
+  cv.cvtColor(src,g,cv.COLOR_RGBA2GRAY);
+  cv.resize(g,big,new cv.Size(Math.round(W*s),Math.round(H*s)),0,0,cv.INTER_CUBIC);cv.GaussianBlur(big,big,new cv.Size(0,0),0.6);
+  cv.threshold(big,b1,0,255,cv.THRESH_BINARY_INV+cv.THRESH_OTSU);                                   // solid ink
+  cv.adaptiveThreshold(big,b2,255,cv.ADAPTIVE_THRESH_GAUSSIAN_C,cv.THRESH_BINARY_INV,Math.round(31*s)|1,35); // thin strokes
+  cv.bitwise_or(b1,b2,b1);
+  cv.findContours(b1,cs,hh,cv.RETR_LIST,cv.CHAIN_APPROX_SIMPLE);
   let paths='';
   for(let i=0;i<cs.size();i++){const c=cs.get(i);
-    if(cv.contourArea(c)>=3){const ap=new cv.Mat();cv.approxPolyDP(c,ap,0.8,true);const d=ap.data32S,P=[];
-      for(let j=0;j<ap.rows;j++)P.push([d[2*j]+0.5,d[2*j+1]+0.5]);
+    if(cv.contourArea(c)>=4){const ap=new cv.Mat();cv.approxPolyDP(c,ap,0.6,true);const d=ap.data32S,P=[];
+      for(let j=0;j<ap.rows;j++)P.push([(d[2*j]+0.5)/s,(d[2*j+1]+0.5)/s]);
       if(P.length>=3)paths+=smooth(P,X,Y);ap.delete()}
     c.delete()}
-  [src,g,b,cs,hh].forEach(x=>x.delete());
-  return buildPDF(pw,ph,`q 0 g 0 G ${fx(k)} w 1 j 1 J\n${paths}B*\nQ\n${textLayer(S.words,k,ph)}`);
+  [src,g,big,b1,b2,cs,hh].forEach(x=>x.delete());
+  return buildPDF(pw,ph,`q 0 g\n${paths}f*\nQ\n${textLayer(S.words,k,ph)}`);
 }
 $('#vec').onclick=async()=>{$('#vec').textContent='Tracing the ink…';await new Promise(r=>setTimeout(r,50));
   try{await save(vectorBlob(),'scan-vector.pdf')}catch(e){alert('Vector export failed: '+e.message)}$('#vec').textContent='Save as vector PDF'};
