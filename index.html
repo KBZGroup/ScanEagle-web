@@ -64,15 +64,18 @@ canvas{width:100%;border:1px solid var(--line);border-radius:4px;background:#fff
 
 <section id="s2" hidden>
   <h2>Your document is ready</h2>
-  <p class="lead">The vector PDF traces the ink as sharp shapes in black, so it stays crisp at any zoom. The page PDF keeps the cleaned photo, in color if you chose Color or Whiteboard. The rebuilt PDF is typeset from your edits. All three are searchable.</p>
-  <button class="btn" id="vec">Save as vector PDF</button>
-  <button class="btn q" id="pdf">Save as PDF, looks like the page</button>
-  <button class="btn q" id="pdf2">Save as rebuilt document PDF</button>
+  <p class="lead">Typeset rebuilds each line as real text in a clean font, at the same position. Vector traces the ink as printed. Page keeps the cleaned photo. Reflowed uses your edits. All are searchable.</p>
+  <div class="seg" id="fonts"><button data-f="serif" class="on">Serif</button><button data-f="sans">Sans</button></div>
+  <button class="btn" id="typ">Save typeset PDF</button>
+  <button class="btn q" id="vec">Save vector PDF</button>
+  <button class="btn q" id="pdf">Save page PDF</button>
+  <button class="btn q" id="pdf2">Save reflowed PDF with my edits</button>
   <button class="btn q" id="print">Print</button>
   <button class="btn q" id="png">Save the cleaned scan</button>
   <button class="btn q" id="back">Back to editing</button>
   <button class="btn q" id="again">Scan another page</button>
 </section>
+<p class="note" style="text-align:center;margin-top:36px">ScanEagle v6</p>
 </main>
 <div id="printDoc"></div>
 
@@ -162,12 +165,13 @@ function flatten(photo,full){
 }
 
 // Layout: group OCR lines into blocks; detect headings, alignment and size
+const lh=l=>{const w=(l.words||[]).map(q=>q.bbox.y1-q.bbox.y0).sort((a,b)=>a-b);return w.length?w[w.length>>1]:l.bbox.y1-l.bbox.y0};
 function group(L){
-  const hs=L.map(l=>l.bbox.y1-l.bbox.y0).sort((a,b)=>a-b),med=hs[hs.length>>1]||1;
+  const hs=L.map(lh).sort((a,b)=>a-b),med=hs[hs.length>>1]||1;
   const left=Math.min(...L.map(l=>l.bbox.x0)),right=Math.max(...L.map(l=>l.bbox.x1)),width=right-left||1;
   const blocks=[];let p=null;
   for(const l of L){
-    const b=l.bbox,t=l.text.replace(/\s+/g,' ').trim(),r=(b.y1-b.y0)/med,w=b.x1-b.x0;
+    const b=l.bbox,t=l.text.replace(/\s+/g,' ').trim(),r=lh(l)/med,w=b.x1-b.x0;
     const align=w<width*0.7&&Math.abs((b.x0+b.x1)/2-(left+right)/2)<width*0.06?'center':(b.x0>left+width*0.3?'right':'left');
     const heading=r>1.3&&t.length<90,fill=b.x1>right-width*0.12;
     if(p&&p.fill&&!heading&&p.blk.type==='paragraph'&&align==='left'&&p.blk.align==='left'&&Math.abs(r-p.r)<0.25&&b.y0-p.y1<med*0.55&&Math.abs(b.x0-p.x0)<width*0.08){
@@ -183,10 +187,10 @@ function group(L){
 async function read(canvas){
   await needOCR();
   const{data}=await Tesseract.recognize(canvas,'eng',{logger:m=>{if(m.status==='recognizing text')$('#msg').textContent='Reading text… '+Math.round(m.progress*100)+'%'}});
-  const blocks=group(data.lines.filter(l=>l.text.trim()));
+  const L=data.lines.filter(l=>l.text.trim()),blocks=group(L),li=lineInfo(L,canvas);
   const doubt=[...new Set(data.words.filter(w=>w.confidence<70&&w.text.trim().length>1).map(w=>w.text))].slice(0,15);
   const words=data.words.filter(w=>w.text.trim()).map(w=>({t:w.text,...w.bbox}));
-  return{blocks,conf:Math.round(data.confidence),doubt,words,dim:[canvas.width,canvas.height]};
+  return{blocks,conf:Math.round(data.confidence),doubt,words,dim:[canvas.width,canvas.height],lines:li.info,med:li.med};
 }
 
 function show(){
@@ -230,7 +234,7 @@ $('#pdf2').onclick=async()=>{await needPDF();const{jsPDF}=window.jspdf,d=new jsP
     for(const l of d.splitTextToSize(b.text,W-2*M)){if(y>H-M){d.addPage();y=M}d.text(l,x,y,{align:b.align||'left'});y+=fs*1.4}y+=fs*0.6}
   save(d.output('blob'),'document.pdf')};
 // Vector export: trace the ink into smooth filled shapes and write the PDF by hand
-const A1=t=>t.replace(/[\u2018\u2019]/g,"'").replace(/[\u201c\u201d]/g,'"').replace(/[\u2013\u2014]/g,'-').replace(/\u2026/g,'...').replace(/[^\x20-\xff]/g,'?').replace(/[\\()]/g,'\\$&');
+const A1=t=>t.replace(/\u2018/g,'\x91').replace(/\u2019/g,'\x92').replace(/\u201c/g,'\x93').replace(/\u201d/g,'\x94').replace(/\u2013/g,'\x96').replace(/\u2014/g,'\x97').replace(/\u2026/g,'\x85').replace(/[^\x20-\xff]/g,'?').replace(/[\\()]/g,'\\$&');
 const fx=n=>String(+n.toFixed(2));
 function smooth(P,X,Y){ // closed polygon -> Bezier path, sharp corners kept
   const n=P.length,T=P.map((p,j)=>{const a=P[(j+n-1)%n],c=P[(j+1)%n],u=[p[0]-a[0],p[1]-a[1]],v=[c[0]-p[0],c[1]-p[1]],
@@ -246,16 +250,49 @@ function textLayer(words,k,ph){ // invisible, searchable text
     s+=`/F1 ${fx(fs)} Tf ${fx(tz)} Tz 1 0 0 1 ${fx(w.x0*k)} ${fx(ph-w.y1*k+hh*0.18)} Tm (${A1(w.t)}) Tj\n`}
   return s+'ET\n';
 }
+const FONTS=['Helvetica','Helvetica-Bold','Times-Roman','Times-Bold'];
 function buildPDF(pw,ph,content){
   const o=['','<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${fx(pw)} ${fx(ph)}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>`,
-    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>'];
-  let out='%PDF-1.4\n';const off=[];
-  for(let i=1;i<=5;i++){off[i]=out.length;out+=`${i} 0 obj\n${o[i]}\nendobj\n`}
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${fx(pw)} ${fx(ph)}] /Contents 4 0 R /Resources << /Font << ${FONTS.map((f,n)=>`/F${n+1} ${5+n} 0 R`).join(' ')} >> >> >>`,
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    ...FONTS.map(f=>`<< /Type /Font /Subtype /Type1 /BaseFont /${f} /Encoding /WinAnsiEncoding >>`)];
+  const n=o.length-1,off=[];let out='%PDF-1.4\n';
+  for(let i=1;i<=n;i++){off[i]=out.length;out+=`${i} 0 obj\n${o[i]}\nendobj\n`}
   const x=out.length;
-  out+='xref\n0 6\n0000000000 65535 f \n'+off.slice(1).map(v=>String(v).padStart(10,'0')+' 00000 n \n').join('')+`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${x}\n%%EOF`;
+  out+=`xref\n0 ${n+1}\n0000000000 65535 f \n`+off.slice(1).map(v=>String(v).padStart(10,'0')+' 00000 n \n').join('')+`trailer\n<< /Size ${n+1} /Root 1 0 R >>\nstartxref\n${x}\n%%EOF`;
   const u=new Uint8Array(out.length);for(let i=0;i<out.length;i++)u[i]=out.charCodeAt(i)&255;
   return new Blob([u],{type:'application/pdf'});
+}
+function surv(d,w,h,rr){ // share of ink pixels that survive erosion = how thick the strokes are
+  const ink=new Uint8Array(w*h);let n=0;for(let i=0;i<w*h;i++)if(d[i*4+1]<128){ink[i]=1;n++}
+  if(!n)return 0;const a=new Uint8Array(w*h);let m=0;
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){let v=1;for(let t=-rr;t<=rr&&v;t++){const xx=x+t;if(xx>=0&&xx<w&&!ink[y*w+xx])v=0}a[y*w+x]=v}
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){if(!ink[y*w+x])continue;let v=1;for(let t=-rr;t<=rr&&v;t++){const yy=y+t;if(yy>=0&&yy<h&&!a[yy*w+x])v=0}m+=v}
+  return m/n;
+}
+// Typeset export: every OCR line as real text, same position, matched width, bold detected from ink density
+function lineInfo(L,canvas){
+  const ctx=canvas.getContext('2d'),hs=L.map(l=>l.bbox.y1-l.bbox.y0).sort((a,b)=>a-b),med=hs[hs.length>>1]||1,rr=Math.max(1,Math.round(med/27)),wm=L.map(lh).sort((a,b)=>a-b),mmh=wm[wm.length>>1]||1;
+  const info=L.map(l=>{
+    const b=l.bbox,x=Math.max(0,Math.floor(b.x0)),y=Math.max(0,Math.floor(b.y0)),w=Math.max(1,Math.min(canvas.width-x,Math.ceil(b.x1-b.x0))),h=Math.max(1,Math.min(canvas.height-y,Math.ceil(b.y1-b.y0)));
+    let sv=0;try{sv=surv(ctx.getImageData(x,y,w,h).data,w,h,rr)}catch(e){}
+    const bs=(l.words||[]).filter(q=>q.text.trim()&&!/[gjpqyQ,;()\/]/.test(q.text)).map(q=>q.bbox.y1).sort((a,b)=>a-b),r=lh(l)/mmh;
+    return{t:l.text.replace(/\s+/g,' ').trim(),x0:b.x0,x1:b.x1,y0:b.y0,y1:b.y1,base:bs.length?bs[bs.length>>1]:null,sv,size:r>0.85&&r<1.2?1:r};
+  });
+  const sm=info.map(q=>q.sv).sort((a,b)=>a-b)[info.length>>1]||0;
+  info.forEach(q=>q.bold=q.sv>Math.max(0.075,1.7*sm));
+  return{info,med};
+}
+function typesetBlob(font,measure){
+  const[W,H]=S.dim,pw=595.28,k=pw/W,ph=H*k,o=font==='sans'?0:2;
+  const m=measure||((t,b)=>{const c=typesetBlob.cx||(typesetBlob.cx=document.createElement('canvas').getContext('2d'));
+    c.font=`${b?'bold ':''}100px ${font==='sans'?'Helvetica, Arial, sans-serif':'"Times New Roman", Times, serif'}`;return c.measureText(t).width});
+  let s='0 g\nBT\n';
+  for(const l of S.lines){
+    const em=S.med*l.size/0.92,fs=em*k,nat=m(l.t,l.bold)*fs/100,tz=Math.min(140,Math.max(70,((l.x1-l.x0)*k)/(nat||1)*100)),yb=l.base??(l.y1-0.2*em);
+    s+=`/F${o+(l.bold?2:1)} ${fx(fs)} Tf ${fx(tz)} Tz 1 0 0 1 ${fx(l.x0*k)} ${fx(ph-yb*k)} Tm (${A1(l.t)}) Tj\n`;
+  }
+  return buildPDF(pw,ph,s+'ET\n');
 }
 function vectorBlob(){ // trace from an upscaled copy so thin strokes, dots and curves survive
   const[W,H]=S.dim,pw=595.28,k=pw/W,ph=H*k,X=x=>fx(x*k),Y=y=>fx(ph-y*k),s=Math.max(1,Math.min(3,Math.sqrt(14e6/(W*H))));
@@ -275,8 +312,11 @@ function vectorBlob(){ // trace from an upscaled copy so thin strokes, dots and 
   [src,g,big,b1,b2,cs,hh].forEach(x=>x.delete());
   return buildPDF(pw,ph,`q 0 g\n${paths}f*\nQ\n${textLayer(S.words,k,ph)}`);
 }
+let FONT='serif';
+document.querySelectorAll('#fonts button').forEach(b=>b.onclick=()=>{FONT=b.dataset.f;document.querySelectorAll('#fonts button').forEach(x=>x.classList.toggle('on',x===b))});
+$('#typ').onclick=()=>{if(!S.lines||!S.lines.length){alert('No text was found to typeset.');return}save(typesetBlob(FONT),'document-typeset.pdf')};
 $('#vec').onclick=async()=>{$('#vec').textContent='Tracing the ink…';await new Promise(r=>setTimeout(r,50));
-  try{await save(vectorBlob(),'scan-vector.pdf')}catch(e){alert('Vector export failed: '+e.message)}$('#vec').textContent='Save as vector PDF'};
+  try{await save(vectorBlob(),'scan-vector.pdf')}catch(e){alert('Vector export failed: '+e.message)}$('#vec').textContent='Save vector PDF'};
 const NOTES={doc:'Black and white. Best for letters, forms, receipts, books and notebooks.',color:'Keeps color. Best for cards, forms with logos and anything printed in color.',board:'Whitens the board and boosts marker colors. Text is not read from whiteboards.'};
 document.querySelectorAll('#modes button').forEach(b=>b.onclick=()=>{S.mode=b.dataset.m;document.querySelectorAll('#modes button').forEach(x=>x.classList.toggle('on',x===b));$('#modeNote').textContent=NOTES[S.mode]});
 $('#rot').onclick=async()=>{const c=S.scan,r=document.createElement('canvas');r.width=c.height;r.height=c.width;const x=r.getContext('2d');x.translate(r.width,0);x.rotate(Math.PI/2);x.drawImage(c,0,0);S.scan=r;
